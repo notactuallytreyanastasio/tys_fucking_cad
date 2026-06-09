@@ -113,6 +113,36 @@ instead of him clicking a block, the tooling discovers everything itself.
   exports), saving one representative drawing as DXF and sending it, or just
   sending the block-editor screenshots.
 
+## The Pivot — "this is all some clown lisp workflow"
+
+Ty's verdict on the LISP two-command dance was succinct. Fair: he'd hinted at
+NETLOAD from the first message, and APPLOAD was never an option in his shop.
+So the .NET plugin got built (`dotnet/CableReportPlugin/`):
+
+- **`CABLEREPORT`** — the entire job in ONE command: pick project/folder,
+  batch-scan via side databases (drawings open in any tab are read live —
+  the ObjectDBX active-document limitation doesn't exist here), pick the
+  target drawing (current, or any file — an unopened target gets written
+  and saved in place), blocks placed, command ends. No data file, no
+  document switching, no LISP loading.
+- **`CABLECENSUSNET`** — the census command, same plugin.
+- Carries all the review-driven fixes from the LISP version: pin harvest
+  from terminal/connector blocks by shared wire number, dedupe by
+  (cable tag, wire number) with field-wise merge, unpopulated-pin rows with
+  slot identity, spare flavor rendering, accounting line, tag-convention
+  verdict, per-cable source sheets.
+- **Compiles clean** — 0 errors, 0 warnings against the real AutoCAD.NET
+  R25 assemblies (built and verified on the Mac via `EnableWindowsTargeting`;
+  builds the same on Windows with `dotnet build -c Release`).
+- Deploy: `NETLOAD` per session, or a `.bundle` in
+  `%APPDATA%\Autodesk\ApplicationPlugins` for auto-load (no admin, no store).
+
+Meanwhile the build workflow finished: the adversarial review found 11 issues
+(1 critical — pin data was never associated with marker-family cables; 4
+major) and the fix phase applied all of them to `CableReport.lsp`. The LISP
+version still works and stays as the fallback; the .NET plugin is now the
+recommended path.
+
 ## What Happens Next
 
 1. Workflow finishes → verify files, summarize review findings, log the

@@ -32,14 +32,24 @@ certainly differs.** Before trusting any scan:
 
 Nothing else in the tool is trustworthy until CONFIG matches reality.
 
-## Loading the tool (APPLOAD)
+## Loading the tool (no APPLOAD required)
 
-1. In AutoCAD Electrical: `APPLOAD`.
-2. Browse to `CableReport.lsp`, click **Load**.
-3. Optional: add it to the *Startup Suite* in the same dialog so it loads
-   every session.
-4. You should see: `CableReport.lsp loaded. Commands: CABLEDUMP, CABLESCAN,
-   CABLEPLACE`.
+APPLOAD is not available in every shop. Any of these works instead
+(see TECHNIQUES.md for detail):
+
+1. **Command line** — type or paste directly into AutoCAD's command line:
+   `(load "C:/path/to/CableReport.lsp")`
+   (forward slashes or doubled backslashes). Loads for the current session.
+2. **AcadE Project-Wide Utilities** (Project tab > Project Tools >
+   Utilities) — accepts a one-line LISP expression such as the same
+   `(load ...)`; AcadE runs it in every selected project drawing.
+3. **Auto-load every session** — put an `acaddoc.lsp` containing the
+   `(load ...)` line in a support-path folder, or drop a `.bundle` folder
+   with a `PackageContents.xml` into
+   `%APPDATA%\Autodesk\ApplicationPlugins` (per-user, no admin rights).
+
+After loading you should see: `CableReport.lsp loaded. Commands: CABLEDUMP,
+CABLESCAN, CABLEPLACE`.
 
 If your security settings block loading, add the folder to *Options >
 Files > Trusted Locations* (or set `SECURELOAD` appropriately per your CAD
@@ -63,9 +73,10 @@ Scan source [Project/Folder] <Folder>:
 Each drawing is opened invisibly through **ObjectDBX**
 (`ObjectDBX.AxDbDocument.25` on 2026 — the major version is taken from
 `ACADVER`, so the same file works on other releases). If a file in the list
-*is* the drawing you are sitting in, it is scanned through the active
-document instead, because ObjectDBX cannot open an in-use file. Unreadable
-files are reported and skipped, never fatal.
+is already open in your session (**any** tab, not just the active one), it
+is scanned through that open document instead, because ObjectDBX cannot
+open an in-use file. Unreadable files are reported and skipped, never
+fatal, and pressing Esc mid-scan releases the ObjectDBX document cleanly.
 
 What counts as a cable component: any attributed block reference in model
 space where one of the configured cable-tag attributes (`CABLENO`, `TAGXREF`,
@@ -77,11 +88,21 @@ one cable record — **exact string match, project-wide, across drawings**:
   first (parent markers win because children usually carry none);
 - a parent marker that carries its own COLOR/WIRENO contributes conductor #1
   (it is a conductor, not just a header — see EXAMPLES.md A1/A4);
-- conductor rows union across drawings and dedupe when identical
-  (continuation markers, duplicated wire segments);
+- conductor rows dedupe by **(cable tag, wire number)** across drawings:
+  the same wire seen with different attribute completeness merges into one
+  row, blank color/pin fields filling in field-wise (continuation markers,
+  duplicated wire segments). Blank-wire and spare rows merge only when
+  literally identical;
 - numbered attribute families (`WIRE1/COLOR1/PIN1` ... `WIRE12/...`) on
   single-block cable schedules are enumerated and zipped by **numeric**
   suffix (PIN10 after PIN9), so the D1 pattern in EXAMPLES.md works too;
+- all-blank numbered slots whose pin attribute exists on the insert are
+  kept as **unpopulated** spares (C1-style `TERM09..12 = ""`), and spare
+  tokens in the wire field are classified as **landed** spares;
+- pins are also picked up from **non-cable blocks** (terminal symbols,
+  schedules) that carry a wire number and a pin on the same insert —
+  e.g. `HT0_001` with `WIRENO=1000` + `TERM01=1` fills `TB1:1` into the
+  matching conductor of whatever cable owns wire 1000;
 - source drawings are tracked per cable.
 
 You get a per-drawing progress line, a final summary table (tag, conductor
@@ -102,14 +123,25 @@ CABLE: <description>
 TAG:   <cable tag>
 PART:  <MFG> <CAT>
 LOC:   <location>
-<wire>      <color>  pin <pin>     <- two columns: wire at x=0,
-<wire>      <color>  pin <pin>        color/pin at the configured offset
-(SPARE)     <color>                <- blank or spare-token wire numbers
+-----------------------------------------------
+WIRE        COLOR + PIN                <- two columns: wire at x=0,
+<wire>      <color>  pin <pin>            color/pin at the configured offset
+<wire>      <color>  TB1:3              <- terminations merged from terminal blocks
+<wire>      <color>  (no pin data)
+SPARE       --  pin 9  (unpopulated)   <- empty pin attribute on the insert
+SPARE       <color>  landed: <pin>     <- spare token in the wire field
+SPARE       <color>  (slot 11)         <- schedule slot with color, no wire
+-----------------------------------------------
+<n> of <n> conductors assigned.        <- or "N conductors, U used, S spare."
+Tag = highest wire no (1002): convention holds.   <- verified, never assumed
 ```
 
-Rows sort by pin number **only when every pin present is numeric**
-(`distof`); otherwise extraction order is kept. Pin order is **never**
-inferred from wire numbers — see EXAMPLES.md B1/B2 for why that rule exists.
+Numeric pins sort numerically (`distof`, so 10 > 9); non-numeric pins sort
+by contact sequence (case-insensitive string order); on a mixed cable the
+numeric pins lead and pin-less rows keep extraction order at the end. Pin
+order is **never** inferred from wire numbers — see EXAMPLES.md B1/B2 for
+why that rule exists. The closing tag-convention line appears whenever the
+tag has trailing digits and at least one all-digit wire number was found.
 
 Each block is inserted with `entmake` (`INSERT` with `66 . 1`, one `ATTRIB`
 per cell positioned at insertion point + local offset, closed by `SEQEND`).
@@ -156,19 +188,25 @@ All tunables live in the clearly marked CONFIG section at the top of
 - **Model space only.** Paper-space and nested (block-in-block) inserts are
   not scanned.
 - **Attribute-based extraction only.** Wire/color/pin data is read from
-  attributes *on the cable-tagged blocks themselves* (markers and schedule
-  blocks). The geometric work — pairing a connector's `TERMxx` pin with the
-  wire whose endpoint it touches, following `SIGCODE` source/destination
-  arrows across sheets, picking up wire numbers from `WD_WNH` blocks for
-  inline markers that carry no `WIRENO` — is **not implemented yet**. That
-  is the machinery EXAMPLES.md groups B and parts of A/C exercise; until it
-  lands, device-side pins (e.g. `TERM01=+` on a transmitter) won't appear in
-  rows unless they live on the cable-tagged block.
-- **Spare handling is partial.** Blank or spare-token wire fields render as
-  `(SPARE)` rows when the slot exists on a scanned block (D1-style schedule
-  blocks, landed spares). Unpopulated pins on *device* blocks and
-  catalog-inferred pin complements (C1/C3 in EXAMPLES.md) need the geometric
-  pass plus a catalog table and are not produced yet.
+  attributes on the cable-tagged blocks, plus pins from any block that
+  carries a wire number and a pin **on the same insert** (terminal symbols
+  like `HT0_001`, schedule blocks) — these merge into the owning cable's
+  conductors by shared wire number. The geometric work — pairing a
+  connector's `TERMxx` pin with the wire whose endpoint it touches,
+  following `SIGCODE` source/destination arrows across sheets, picking up
+  wire numbers from `WD_WNH` blocks for inline markers that carry no
+  `WIRENO` — is **not implemented yet**. That is the machinery EXAMPLES.md
+  group B and parts of A/C exercise; until it lands, device-side pins
+  (e.g. `TERM01=+` on a transmitter with no `WIRENO`) won't appear in rows,
+  and inline children without `WIRENO` render as `(no wire no)` rows.
+- **Spare handling distinguishes two of the three flavors.** Unpopulated
+  pins (a pin attribute exists on a cable-tagged insert but the slot is
+  blank) render `SPARE  --  pin <n>  (unpopulated)`; spare tokens in the
+  wire field render `SPARE  <color>  landed[: <pin>]`; D1-style schedule
+  slots with a color but no wire render `SPARE  <color>  (slot <n>)`.
+  The third flavor — pins *deleted* from the insert and known only from a
+  catalog lookup (C3 in EXAMPLES.md) — needs a catalog table and is not
+  produced yet.
 - **`.wdp` parsing is heuristic.** Lines starting with `+ = ? * ; [ ~` are
   treated as directives and skipped; everything else is assumed to be a
   drawing path. Exotic project files may need the Folder mode instead.

@@ -1,0 +1,23 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v8.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v8.0": {
+      "CableReportPlugin/1.0.0": {
+        "runtime": {
+          "CableReportPlugin.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "CableReportPlugin/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}

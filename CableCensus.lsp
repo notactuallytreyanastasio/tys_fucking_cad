@@ -12,7 +12,8 @@
 ;;;      (values matching CBL*) and prints a suggested CONFIG
 ;;;      for CableReport.lsp
 ;;;
-;;; Usage:  APPLOAD this file, run CABLECENSUS, pick Project (.wdp)
+;;; Usage:  (load "C:/path/CableCensus.lsp") at the command line
+;;;         (no APPLOAD needed), run CABLECENSUS, pick Project (.wdp)
 ;;;         or Folder, then send attribute-census.csv back.
 ;;; ============================================================
 

@@ -1,0 +1,13 @@
+/Users/robertgrayson/code/tys_fucking_cad/dotnet/CableReportPlugin/bin/Release/CableReportPlugin.deps.json
+/Users/robertgrayson/code/tys_fucking_cad/dotnet/CableReportPlugin/bin/Release/CableReportPlugin.dll
+/Users/robertgrayson/code/tys_fucking_cad/dotnet/CableReportPlugin/bin/Release/CableReportPlugin.pdb
+/Users/robertgrayson/code/tys_fucking_cad/dotnet/CableReportPlugin/obj/Release/CableReportPlugin.csproj.AssemblyReference.cache
+/Users/robertgrayson/code/tys_fucking_cad/dotnet/CableReportPlugin/obj/Release/CableReportPlugin.GeneratedMSBuildEditorConfig.editorconfig
+/Users/robertgrayson/code/tys_fucking_cad/dotnet/CableReportPlugin/obj/Release/CableReportPlugin.AssemblyInfoInputs.cache
+/Users/robertgrayson/code/tys_fucking_cad/dotnet/CableReportPlugin/obj/Release/CableReportPlugin.AssemblyInfo.cs
+/Users/robertgrayson/code/tys_fucking_cad/dotnet/CableReportPlugin/obj/Release/CableReportPlugin.csproj.CoreCompileInputs.cache
+/Users/robertgrayson/code/tys_fucking_cad/dotnet/CableReportPlugin/obj/Release/CableReportPlugin.sourcelink.json
+/Users/robertgrayson/code/tys_fucking_cad/dotnet/CableReportPlugin/obj/Release/CableReportPlugin.dll
+/Users/robertgrayson/code/tys_fucking_cad/dotnet/CableReportPlugin/obj/Release/refint/CableReportPlugin.dll
+/Users/robertgrayson/code/tys_fucking_cad/dotnet/CableReportPlugin/obj/Release/CableReportPlugin.pdb
+/Users/robertgrayson/code/tys_fucking_cad/dotnet/CableReportPlugin/obj/Release/ref/CableReportPlugin.dll
