@@ -21,16 +21,22 @@
 ;;;               Folder  = pick any DWG in a folder; every *.dwg in
 ;;;                         that folder is scanned.
 ;;;             Drawings are read WITHOUT opening them on screen via
-;;;             ObjectDBX (vla-GetInterfaceObject). If a file is the
-;;;             active drawing it is scanned through the active
-;;;             document instead (ObjectDBX cannot open an in-use
-;;;             file). Every attributed block reference in ModelSpace
+;;;             ObjectDBX (vla-GetInterfaceObject). If a file is
+;;;             already open in this session (ANY tab, not just the
+;;;             active one) it is scanned through that open document
+;;;             instead (ObjectDBX cannot open an in-use file).
+;;;             Every attributed block reference in ModelSpace
 ;;;             is examined; a block is a cable component when one of
 ;;;             the CONFIG cable-tag attributes carries a value that
 ;;;             matches the CONFIG cable pattern (default "CBL*").
 ;;;             Blocks sharing one cable tag merge project-wide:
-;;;             empty header fields fill in, conductor rows union and
-;;;             dedupe, source drawings are tracked. Results persist
+;;;             empty header fields fill in, conductor rows dedupe by
+;;;             (cable tag, wire number) with field-wise fill of
+;;;             blanks (blank/spare-wire rows merge only when
+;;;             literally identical), and pins are picked up from
+;;;             NON-cable blocks (terminals/schedules) that pair a
+;;;             WIRENO with a pin on the same insert. Source drawings
+;;;             are tracked per cable. Results persist
 ;;;             via prin1 into cable-data.lsp next to the source so
 ;;;             placement can happen in a DIFFERENT drawing.
 ;;;
@@ -38,17 +44,29 @@
 ;;;             for a top-left point, then for EACH cable entmakes a
 ;;;             unique block definition (CBLRPT_<tag>, suffixed when
 ;;;             the name already exists) full of ATTDEFs:
-;;;             name / tag / part / location header lines, then one
-;;;             row per conductor in two columns — wire number at
-;;;             x = 0 and "COLOR  pin N" at a configured offset.
-;;;             Unpopulated wires render "(SPARE)". Rows sort by pin
-;;;             number when every pin present is numeric (distof) —
-;;;             pin order is NEVER inferred from wire numbers.
-;;;             Blocks stack downward and wrap to a new column when
-;;;             the configured max column height would be exceeded.
+;;;             name / tag / part / location header lines, separator
+;;;             + WIRE / COLOR + PIN column header, then one row per
+;;;             conductor in two columns — wire number at x = 0 and
+;;;             "COLOR  pin N" at a configured offset — closed by a
+;;;             separator, a conductor accounting line and (when
+;;;             computable) a tag-convention verdict. Spare flavors
+;;;             render distinctly: "SPARE ... (unpopulated)",
+;;;             "SPARE ... landed", "SPARE ... (slot n)". Numeric
+;;;             pins sort numerically (distof), letter pins sort by
+;;;             contact sequence (string order); on a mix the numeric
+;;;             pins lead — pin order is NEVER inferred from wire
+;;;             numbers. Blocks stack downward and wrap to a new
+;;;             column when the configured max column height would be
+;;;             exceeded.
 ;;;
 ;;; DATA MODEL (persisted list, one record per cable)
-;;;   (tag name mfg cat loc (dwg ...) ((wire color pin) ...))
+;;;   (tag name mfg cat loc (dwg ...) ((wire color pin slot flavor) ...))
+;;;   slot   = numeric attribute suffix (0 = bare WIRENO/COLOR/PIN
+;;;            tags); nil on rows loaded from legacy data files
+;;;   flavor = nil      normal conductor
+;;;            "LANDED" spare token in the wire field (landed spare)
+;;;            "UNPOP"  a pin-family attribute exists on the insert
+;;;                     but the whole slot is blank (unpopulated pin)
 ;;; ===================================================================
 
 (vl-load-com)
@@ -171,6 +189,14 @@
   (if (= out "") (setq out "X"))
   out)
 
+(defun cbl:tag-tail-digits (s / i out)
+  ;; trailing digit run of a tag ("CBL-1002" -> "1002"); nil when none
+  (setq i (strlen s) out "")
+  (while (and (> i 0) (wcmatch (substr s i 1) "#"))
+    (setq out (strcat (substr s i 1) out)
+          i   (1- i)))
+  (if (= out "") nil out))
+
 ;;; ---------------------- VLA / block helpers -----------------------
 
 (defun cbl:effname (vobj / r)
@@ -185,7 +211,10 @@
   (foreach a lst
     (setq out (cons (cons (strcase (vla-get-TagString a))
                           (vla-get-TextString a))
-                    out)))
+                    out))
+    ;; drop the COM reference as soon as it is read so long DBX scans
+    ;; do not pin every attribute object until garbage collection
+    (vl-catch-all-apply 'vlax-release-object (list a)))
   (reverse out))
 
 ;;; ---------------------- classification ----------------------------
@@ -213,11 +242,16 @@
         (if (and tv (/= (cbl:trim tv) "")) (setq v (cbl:trim tv))))))
   v)
 
-(defun cbl:rows-from-atts (atts / slots tag val sfx idx cur rows)
+(defun cbl:rows-from-atts (atts / slots pinslots tag val sfx idx cur rows
+                                  w c p fl)
   ;; Collect conductor slots from wire/color/pin families.
   ;; Suffix 0 = the bare tags on a plain marker (one conductor);
   ;; suffixes 1..n = numbered families on a schedule block.
-  ;; Returns ((wire color pin) ...) — all strings, possibly "".
+  ;; Returns ((wire color pin slot flavor) ...): wire/color/pin are
+  ;; strings (possibly ""), slot is the numeric tag suffix, flavor is
+  ;; nil, "LANDED" (spare token in the wire field) or "UNPOP" (a
+  ;; pin-family attribute physically exists on the insert but the
+  ;; whole slot is blank — unpopulated pins must stay visible).
   (foreach pr atts
     (setq tag (car pr)
           val (cbl:trim (cdr pr))
@@ -229,6 +263,8 @@
       ((setq sfx (cbl:prefix-suffix tag cbl:cfg-pin-prefixes))   (setq idx 2)))
     (if idx
       (progn
+        (if (and (= idx 2) (not (member sfx pinslots)))
+          (setq pinslots (cons sfx pinslots)))
         (setq cur (cond ((cdr (assoc sfx slots)))
                         ((list "" "" ""))))
         (setq cur (cbl:list-set cur idx val))
@@ -238,16 +274,40 @@
   ;; numeric sort of suffixes (PIN10 after PIN9, never string sort)
   (setq slots (vl-sort slots '(lambda (a b) (< (car a) (car b)))))
   (foreach s slots
-    (if (or (/= (nth 0 (cdr s)) "")
-            (/= (nth 1 (cdr s)) "")
-            (/= (nth 2 (cdr s)) ""))
-      (setq rows (append rows (list (cdr s))))))
+    (setq w (nth 0 (cdr s))
+          c (nth 1 (cdr s))
+          p (nth 2 (cdr s)))
+    (setq fl (cond ((cbl:spare-token-p w) "LANDED")
+                   ((and (= w "") (= c "") (= p "")
+                         (member (car s) pinslots))
+                    "UNPOP")))
+    ;; keep populated slots, plus all-blank slots whose pin attribute
+    ;; exists on the insert (C1-style unpopulated pins)
+    (if (or (/= w "") (/= c "") (/= p "") (= fl "UNPOP"))
+      (setq rows (append rows (list (list w c p (car s) fl))))))
   rows)
 
 ;;; ---------------------- project-wide merge -------------------------
 ;;; cbl:*cables* : list of (tag name mfg cat loc (dwg ...) (row ...))
 
-(defun cbl:merge-cable (tag atts rows dwg / rec name mfg cat loc dwgs rws)
+(defun cbl:fld (a b)
+  ;; a unless blank/nil, else b, else ""
+  (cond ((and a (/= (cbl:trim a) "")) a)
+        (b)
+        ("")))
+
+(defun cbl:row-fill (a b)
+  ;; field-wise merge of two rows for the SAME wire number: keep a's
+  ;; fields, fill blanks/nils from b (so a marker carrying wire+color
+  ;; and a block carrying wire+pin become ONE complete row)
+  (list (cbl:fld (nth 0 a) (nth 0 b))
+        (cbl:fld (nth 1 a) (nth 1 b))
+        (cbl:fld (nth 2 a) (nth 2 b))
+        (cond ((nth 3 a)) ((nth 3 b)))
+        (cond ((nth 4 a)) ((nth 4 b)))))
+
+(defun cbl:merge-cable (tag atts rows dwg / rec name mfg cat loc dwgs rws
+                                            w ex)
   (setq rec (assoc tag cbl:*cables*))
   (if (null rec) (setq rec (list tag "" "" "" "" nil nil)))
   (setq name (nth 1 rec) mfg (nth 2 rec) cat (nth 3 rec)
@@ -258,19 +318,94 @@
   (if (= cat "")  (setq cat  (cbl:nz (cbl:getatt atts cbl:cfg-cat-atts)  "")))
   (if (= loc "")  (setq loc  (cbl:nz (cbl:getatt atts cbl:cfg-loc-atts)  "")))
   (if (not (member dwg dwgs)) (setq dwgs (append dwgs (list dwg))))
-  ;; union conductor rows, dedupe identical (wire color pin) triples;
-  ;; spare-token / blank-wire rows are NOT merged across instances
-  ;; unless literally identical in all three fields
+  ;; conductor identity = (cable tag, wire number): rows with a real
+  ;; wire number merge by wire, filling blank color/pin fields, so a
+  ;; continuation marker seen with different attribute completeness
+  ;; never inflates the conductor count. Blank-wire / spare-token
+  ;; rows merge only when literally identical (same slot/flavor too).
   (foreach r rows
-    (if (not (member r rws)) (setq rws (append rws (list r)))))
+    (setq w (cbl:trim (car r)))
+    (cond
+      ((and (/= w "") (not (cbl:spare-token-p w)))
+       (setq ex nil)
+       (foreach x rws
+         (if (and (null ex) (= (cbl:trim (car x)) w)) (setq ex x)))
+       (if ex
+         (setq rws (subst (cbl:row-fill ex r) ex rws))
+         (setq rws (append rws (list r)))))
+      (T
+       (if (not (member r rws)) (setq rws (append rws (list r)))))))
   (setq cbl:*cables*
         (cons (list tag name mfg cat loc dwgs rws)
               (vl-remove-if '(lambda (x) (= (car x) tag)) cbl:*cables*))))
 
+;;; ---------------------- pin cross-reference ------------------------
+;;; cbl:*pins* : ((wireno . termination-text) ...) harvested from
+;;; NON-cable-tagged blocks (terminals, connectors, schedules) that
+;;; carry both a wire number and a pin on the same insert. Purely
+;;; attribute-based: TERMxx pins that pair with wires only by drawing
+;;; geometry (insertion point touching the wire) are NOT recovered.
+
+(defun cbl:add-pin (w p / pr)
+  (setq pr (cons w p))
+  (if (not (member pr cbl:*pins*))
+    (setq cbl:*pins* (append cbl:*pins* (list pr)))))
+
+(defun cbl:harvest-pins (atts / ctx rows wonly ponly w p)
+  ;; Two attribute-only patterns:
+  ;;   1. schedule-style: wire and pin share a numbered slot
+  ;;   2. terminal-style (HT0_001: WIRENO=1000 + TERM01=1): exactly
+  ;;      one wire value and exactly one pin value in separate slots
+  ;; The termination is prefixed with TAGSTRIP/TAG1 context when known
+  ;; ("TB1:1") so CABLEPLACE can show where the conductor lands.
+  (setq ctx (cond ((cbl:getatt atts '("TAGSTRIP")))
+                  ((cbl:getatt atts '("TAG1")))))
+  (setq rows (cbl:rows-from-atts atts))
+  (foreach r rows
+    (setq w (cbl:trim (car r))
+          p (cbl:trim (caddr r)))
+    (cond
+      ((or (= w "") (cbl:spare-token-p w))
+       (if (/= p "") (setq ponly (cons p ponly))))
+      ((/= p "")
+       (cbl:add-pin w (if ctx (strcat ctx ":" p) p)))
+      (T (setq wonly (cons w wonly)))))
+  (if (and (= (length wonly) 1) (= (length ponly) 1))
+    (cbl:add-pin (car wonly)
+                 (if ctx
+                   (strcat ctx ":" (car ponly))
+                   (car ponly)))))
+
+(defun cbl:pins-for (w / out)
+  (foreach pr cbl:*pins*
+    (if (and (= (car pr) w) (not (member (cdr pr) out)))
+      (setq out (append out (list (cdr pr))))))
+  out)
+
+(defun cbl:apply-pins ( / )
+  ;; after every drawing is scanned, fill EMPTY pin fields on real
+  ;; conductors from the project-wide wireno -> termination map; pins
+  ;; already present on the cable-tagged block are never overwritten
+  (setq cbl:*cables*
+        (mapcar
+          '(lambda (rec)
+             (cbl:list-set rec 6
+               (mapcar
+                 '(lambda (r / w hits)
+                    (setq w (cbl:trim (car r)))
+                    (if (and (/= w "")
+                             (not (cbl:spare-token-p w))
+                             (= (cbl:trim (cond ((caddr r)) (""))) "")
+                             (setq hits (cbl:pins-for w)))
+                      (cbl:list-set r 2 (cbl:join hits " -> "))
+                      r))
+                 (nth 6 rec))))
+          cbl:*cables*)))
+
 ;;; ---------------------- drawing scanners ---------------------------
 
 (defun cbl:scan-doc (doc dwg / ms cnt hits atts ctag)
-  ;; works identically on the active document and on a DBX document
+  ;; works identically on an open document and on a DBX document
   (setq cnt 0 hits 0)
   (setq ms (vla-get-ModelSpace doc))
   (vlax-for obj ms
@@ -283,10 +418,30 @@
         (if ctag
           (progn
             (setq hits (1+ hits))
-            (cbl:merge-cable ctag atts (cbl:rows-from-atts atts) dwg))))))
+            (cbl:merge-cable ctag atts (cbl:rows-from-atts atts) dwg))
+          ;; non-cable blocks may still pair a wire with a pin
+          (cbl:harvest-pins atts)))))
+  ;; drop the ModelSpace reference so the previous DBX database is not
+  ;; pinned in memory while the next drawing is opened
+  (vl-catch-all-apply 'vlax-release-object (list ms))
   (princ (strcat "\n  " (cbl:pad dwg 24) (itoa cnt)
                  " attributed insert(s), " (itoa hits) " cable marker(s)"))
   T)
+
+(defun cbl:open-doc-for (ff / d fn r)
+  ;; the AcadDocument already open in THIS session (any MDI tab) whose
+  ;; full path matches ff, else nil. ObjectDBX cannot open ANY file
+  ;; the current editor has open — not just the active one — so every
+  ;; open drawing must be scanned through its document object.
+  (setq ff (strcase ff))
+  (vlax-for d (vla-get-Documents (vlax-get-acad-object))
+    (if (null r)
+      (progn
+        (setq fn (vl-catch-all-apply 'vla-get-FullName (list d)))
+        (if (and (not (vl-catch-all-error-p fn))
+                 (= (strcase fn) ff))
+          (setq r d)))))
+  r)
 
 (defun cbl:get-dbx ( / ver r)
   ;; ObjectDBX document factory. AutoCAD 2026 ACADVER = "25.x" -> ".25"
@@ -386,10 +541,22 @@
 ;;; COMMAND: CABLESCAN — batch extraction via ObjectDBX
 ;;; ===================================================================
 
-(defun c:CABLESCAN ( / mode src dir files datafile actdoc actpath
+(defun c:CABLESCAN ( / *error* mode src dir files datafile odoc
                        dbx f ff res okc skc rec rows)
   (vl-load-com)
-  (setq cbl:*cables* nil)
+  ;; local handler: release the DBX document even on Esc or a hard
+  ;; error so it does not leak for the rest of the session; the prior
+  ;; *error* restores automatically because *error* is a local here
+  (defun *error* (msg)
+    (if dbx (vl-catch-all-apply 'vlax-release-object (list dbx)))
+    (setq dbx nil)
+    (if (and msg
+             (not (wcmatch (strcase msg) "*BREAK*,*CANCEL*,*EXIT*,*QUIT*")))
+      (princ (strcat "\nCABLESCAN error: " msg))
+      (princ "\nCABLESCAN cancelled."))
+    (princ))
+  (setq cbl:*cables* nil
+        cbl:*pins*   nil)
   (initget "Project Folder")
   (setq mode (getkword "\nScan source [Project/Folder] <Folder>: "))
   (if (null mode) (setq mode "Folder"))
@@ -416,20 +583,25 @@
      (princ "\nNo drawings found to scan."))
     (T
      (princ (strcat "\nScanning " (itoa (length files)) " drawing(s)..."))
-     (setq actdoc  (vla-get-ActiveDocument (vlax-get-acad-object))
-           actpath (strcase (strcat (vla-get-Path actdoc) "\\"
-                                    (vla-get-Name actdoc)))
-           dbx nil okc 0 skc 0)
+     (setq dbx nil okc 0 skc 0)
      (foreach f files
        (setq ff (findfile f))
        (cond
          ((null ff)
           (setq skc (1+ skc))
           (princ (strcat "\n  SKIP (not found): " f)))
-         ((= (strcase ff) actpath)
-          ;; ObjectDBX cannot open the file we are sitting in
-          (cbl:scan-doc actdoc (vl-filename-base ff))
-          (setq okc (1+ okc)))
+         ((setq odoc (cbl:open-doc-for ff))
+          ;; ObjectDBX cannot open a file this session already has
+          ;; open (ANY tab) — scan through the open document instead
+          (setq res (vl-catch-all-apply
+                      'cbl:scan-doc
+                      (list odoc (vl-filename-base ff))))
+          (if (vl-catch-all-error-p res)
+            (progn
+              (setq skc (1+ skc))
+              (princ (strcat "\n  SKIP (scan failed): " f " ["
+                             (vl-catch-all-error-message res) "]")))
+            (setq okc (1+ okc))))
          (T
           (if (null dbx) (setq dbx (cbl:get-dbx)))
           (if (null dbx)
@@ -454,6 +626,9 @@
                                      (vl-catch-all-error-message res) "]")))
                     (setq okc (1+ okc))))))))))
      (if dbx (vlax-release-object dbx))
+     (setq dbx nil)
+     ;; fill empty pin fields from terminal/connector data project-wide
+     (cbl:apply-pins)
      ;; ---- summary table ----
      (princ "\n\n================== CABLE SUMMARY ==================")
      (princ (strcat "\nDrawings scanned: " (itoa okc)
@@ -480,32 +655,38 @@
 ;;; COMMAND: CABLEPLACE — entmake report blocks in the target drawing
 ;;; ===================================================================
 
-(defun cbl:sort-rows (rows / allnum pinned unpinned)
-  ;; Sort by pin when EVERY non-empty pin is numeric (distof).
-  ;; Pin order is NEVER inferred from wire-number order. Rows without
-  ;; pins (incl. spares) follow in extraction order.
-  (setq allnum T)
-  (foreach r rows
-    (if (and (/= (cbl:trim (caddr r)) "")
-             (null (distof (caddr r) 2)))
-      (setq allnum nil)))
+(defun cbl:sort-rows (rows / pinned unpinned numr alpr)
+  ;; Numeric pins sort numerically (distof, so 10 > 9). Non-numeric
+  ;; pins sort by contact sequence — case-insensitive string order,
+  ;; which is the MIL lettering order with I/O/Q simply absent. On a
+  ;; mixed cable the numeric pins lead. Pin order is NEVER inferred
+  ;; from wire numbers; rows without pins (incl. spares) keep
+  ;; extraction order at the end.
   (setq pinned   (vl-remove-if
                    '(lambda (r) (= (cbl:trim (caddr r)) "")) rows)
         unpinned (vl-remove-if-not
-                   '(lambda (r) (= (cbl:trim (caddr r)) "")) rows))
-  (if (and allnum pinned)
-    (append (vl-sort pinned
-                     '(lambda (a b)
-                        (< (distof (caddr a) 2) (distof (caddr b) 2))))
-            unpinned)
-    rows))
+                   '(lambda (r) (= (cbl:trim (caddr r)) "")) rows)
+        numr     (vl-remove-if-not
+                   '(lambda (r) (distof (caddr r) 2)) pinned)
+        alpr     (vl-remove-if
+                   '(lambda (r) (distof (caddr r) 2)) pinned))
+  (append
+    (vl-sort numr '(lambda (a b)
+                     (< (distof (caddr a) 2) (distof (caddr b) 2))))
+    (vl-sort alpr '(lambda (a b)
+                     (< (strcase (caddr a)) (strcase (caddr b)))))
+    unpinned))
 
-(defun cbl:layout-cells (rec / cells y dy n s srows r wire c2)
+(defun cbl:layout-cells (rec / cells y dy n s srows r wire c2 w p fl slot
+                               pinp sep used spare maxw tail acct conv)
   ;; -> list of (attdef-tag text x y), local block coordinates,
-  ;; first line at y=0 running downward
-  (setq dy (* cbl:cfg-text-height cbl:cfg-row-factor)
-        y  0.0
-        n  0)
+  ;; first line at y=0 running downward. Emits the normative block:
+  ;; 4 header lines, separator, column header, conductor rows,
+  ;; separator, conductor accounting line, tag-convention verdict.
+  (setq dy  (* cbl:cfg-text-height cbl:cfg-row-factor)
+        y   0.0
+        n   0
+        sep "-----------------------------------------------")
   (foreach s (list (strcat "CABLE: " (cbl:nz (nth 1 rec) "(no name)"))
                    (strcat "TAG:   " (car rec))
                    (strcat "PART:  "
@@ -516,23 +697,99 @@
     (setq n (1+ n))
     (setq cells (cons (list (strcat "HDR" (itoa n)) s 0.0 y) cells))
     (setq y (- y dy)))
+  (setq cells (cons (list "SEP1" sep 0.0 y) cells)
+        y     (- y dy))
+  (setq cells (cons (list "CHW" "WIRE" 0.0 y) cells))
+  (setq cells (cons (list "CHC" "COLOR + PIN" cbl:cfg-col2-offset y) cells))
+  (setq y (- y dy))
   (setq srows (cbl:sort-rows (nth 6 rec))
-        n     0)
+        n     0
+        used  0
+        spare 0
+        maxw  nil)
   (foreach r srows
-    (setq n (1+ n))
-    (setq wire (cond ((= (cbl:trim (car r)) "") "(SPARE)")
-                     ((cbl:spare-token-p (car r)) "(SPARE)")
-                     (T (car r))))
-    (setq c2 (cbl:trim
-               (strcat (cadr r)
-                       (if (/= (cbl:trim (caddr r)) "")
-                         (strcat "  pin " (caddr r))
-                         ""))))
+    (setq n    (1+ n)
+          w    (cbl:trim (car r))
+          p    (cbl:trim (cond ((caddr r)) ("")))
+          slot (nth 3 r)
+          fl   (nth 4 r))
+    ;; merged terminations ("TB1:1 -> ...") render as-is; bare pin
+    ;; values get the "pin " prefix
+    (setq pinp (cond ((= p "") "")
+                     ((wcmatch p "*[: ]*") p)
+                     (T (strcat "pin " p))))
+    (cond
+      ((= fl "UNPOP")
+       (setq wire "SPARE"
+             c2   (cbl:trim
+                    (strcat "--  "
+                            (cond ((/= pinp "") pinp)
+                                  ((and slot (> slot 0))
+                                   (strcat "pin " (itoa slot)))
+                                  (T ""))
+                            "  (unpopulated)"))
+             spare (1+ spare)))
+      ((= fl "LANDED")
+       (setq wire "SPARE"
+             c2   (cbl:trim
+                    (strcat (cadr r) "  landed"
+                            (if (/= pinp "") (strcat ": " pinp) "")))
+             spare (1+ spare)))
+      ((or (= w "") (cbl:spare-token-p w))
+       ;; legacy-data blank/spare rows and schedule slots with color
+       ;; but no wire. Slot 0 = a bare inline child marker whose wire
+       ;; identity is geometric — a real conductor, not a spare.
+       (if (and slot (= slot 0))
+         (setq wire "(no wire no)"
+               c2   (cbl:trim (strcat (cadr r)
+                                      (if (/= pinp "")
+                                        (strcat "  " pinp) "")))
+               used (1+ used))
+         (setq wire "SPARE"
+               c2   (cbl:trim
+                      (strcat (cadr r)
+                              (if (/= pinp "") (strcat "  " pinp) "")
+                              (if (and (= pinp "") slot (> slot 0))
+                                (strcat "  (slot " (itoa slot) ")")
+                                "")))
+               spare (1+ spare))))
+      (T
+       (setq wire w
+             c2   (cbl:trim (strcat (cadr r)
+                                    (if (/= pinp "")
+                                      (strcat "  " pinp)
+                                      "  (no pin data)")))
+             used (1+ used))
+       (if (and (cbl:all-digits w)
+                (or (null maxw) (> (atoi w) maxw)))
+         (setq maxw (atoi w)))))
     (setq cells (cons (list (strcat "W" (itoa n)) wire 0.0 y) cells))
     (setq cells (cons (list (strcat "C" (itoa n)) c2
                             cbl:cfg-col2-offset y)
                       cells))
     (setq y (- y dy)))
+  ;; closing separator + conductor accounting + tag-convention check
+  (setq cells (cons (list "SEP2" sep 0.0 y) cells)
+        y     (- y dy))
+  (setq acct (if (> spare 0)
+               (strcat (itoa (+ used spare)) " conductors, "
+                       (itoa used) " used, " (itoa spare) " spare.")
+               (strcat (itoa used) " of " (itoa used)
+                       " conductors assigned.")))
+  (setq cells (cons (list "FTR1" acct 0.0 y) cells)
+        y     (- y dy))
+  ;; verify-never-assume: compare the tag's trailing digits with the
+  ;; highest all-digit wire number actually found
+  (setq tail (cbl:tag-tail-digits (car rec)))
+  (if (and maxw tail)
+    (progn
+      (setq conv (if (= (atoi tail) maxw)
+                   (strcat "Tag = highest wire no (" (itoa maxw)
+                           "): convention holds.")
+                   (strcat "Highest wire = " (itoa maxw) " but TAG = "
+                           (car rec) ": convention DOES NOT hold.")))
+      (setq cells (cons (list "FTR2" conv 0.0 y) cells))
+      (setq y (- y dy))))
   (reverse cells))
 
 (defun cbl:make-blockdef (rec cells / base bname i c)
@@ -577,7 +834,7 @@
                    '(70 . 0))))
   (entmake (list '(0 . "SEQEND") (cons 8 cbl:cfg-layer))))
 
-(defun c:CABLEPLACE ( / df pt topy curx cury placed rec cells nlines
+(defun c:CABLEPLACE ( / df pt topy curx cury placed rec cells miny c
                         bh dy bname recs)
   (vl-load-com)
   (setq df (getfiled "Select cable data file"
@@ -588,7 +845,9 @@
      (princ "\nCancelled."))
     (T
      (setq cbl:loaded-data nil)
-     (load df)
+     ;; onfailure argument: a malformed/truncated data file must fall
+     ;; through to the clean "No cable data" message, not a raw error
+     (load df "cbl-data-load-failed")
      (cond
        ((null cbl:loaded-data)
         (princ "\nNo cable data found in that file (run CABLESCAN first)."))
@@ -606,9 +865,13 @@
                   dy     (* cbl:cfg-text-height cbl:cfg-row-factor)
                   placed 0)
             (foreach rec recs
-              (setq cells  (cbl:layout-cells rec)
-                    nlines (+ 4 (length (nth 6 rec)))
-                    bh     (* nlines dy))
+              ;; block height from the cells actually laid out
+              ;; (headers + separators + rows + accounting lines)
+              (setq cells (cbl:layout-cells rec)
+                    miny  0.0)
+              (foreach c cells
+                (if (< (cadddr c) miny) (setq miny (cadddr c))))
+              (setq bh (+ (- miny) dy))
               ;; wrap to a new column when this block would overflow
               (if (and (< cury topy)
                        (> (+ (- topy cury) bh) cbl:cfg-max-col-height))
