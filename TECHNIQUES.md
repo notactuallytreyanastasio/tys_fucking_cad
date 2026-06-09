@@ -101,9 +101,12 @@ CABLECENSUS but requires loading nothing.
 
 - Exact argument signatures of the `wd_dbx_*` functions — read them out of
   the shipped `Acade\Support` .lsp sources on the real install.
-- How AcadE associates cable child markers with the wire they sit on
-  (geometric/XDATA linkage) — relevant only if the attribute data turns out
-  not to carry wire numbers on children (the B1 scenario in EXAMPLES.md).
+- ~~How AcadE associates cable child markers with wires (geometric/XDATA
+  linkage, SIGCODE following)~~ — struck per the shop's reality: the main
+  cable component carries all conductor data and is read ONCE; no tracing to
+  the other end, no child collection, no sigcode following. (Sigcodes — the
+  significant-digit codes pairing source/destination arrows across sheets —
+  are read-never-write territory: changing them breaks project wiring.)
 - The AcadE catalog/project scratch database layout — not needed for the
   attribute-based v1.
 

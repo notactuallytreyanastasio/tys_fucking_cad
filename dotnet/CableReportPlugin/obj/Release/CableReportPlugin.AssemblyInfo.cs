@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("CableReportPlugin")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+7d4180d82d016b3b0c8f62469b2ed60ec9961ef4")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+24b669eacbfbb2bf1364a9286a9ee1170d636e08")]
 [assembly: System.Reflection.AssemblyProductAttribute("CableReportPlugin")]
 [assembly: System.Reflection.AssemblyTitleAttribute("CableReportPlugin")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

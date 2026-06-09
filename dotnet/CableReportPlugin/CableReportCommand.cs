@@ -27,9 +27,15 @@ namespace CableReportPlugin;
 
 public static class Config
 {
-    // Attributes that can hold a cable identifier (parent or child), exact tags.
-    public static readonly string[] IdentifierAttrs =
-        { "CABLENO", "TAG1", "TAG2", "TAGXREF", "XREF", "TAG" };
+    // Attributes that identify the MAIN cable component, exact tags. Only the
+    // main marker is read — its component data carries the full conductor
+    // list. Child conductor markers are ignored unless AbsorbChildMarkers is
+    // enabled for legacy drawing sets that spread conductors across children.
+    // No cross-reference (XREF) tags: cables live on ONE drawing (Ethernet
+    // runs are the rare exception and still group by exact tag match).
+    public static readonly string[] IdentifierAttrs = { "CABLENO", "TAG1", "TAG" };
+    public static readonly string[] ChildIdentifierAttrs = { "TAG2" };
+    public static readonly bool AbsorbChildMarkers = false;
 
     // A value must match this wildcard to count as a cable tag.
     public const string CablePattern = "CBL*";
@@ -58,8 +64,9 @@ public static class Config
 
     // The single shared report block definition has this many conductor rows;
     // unused rows stay blank on the instance. Cables with more conductors are
-    // truncated with a warning.
-    public const int MaxConductorRows = 24;
+    // truncated with a warning. Pin/wire counts are unlimited in extraction —
+    // numbered families parse multi-digit suffixes (PIN18, WIRE36, ...).
+    public const int MaxConductorRows = 36;
 
     // Output block geometry (drawing units).
     public const double TextHeight = 0.125;
@@ -382,6 +389,11 @@ public class Commands
             string? cableTag = Config.IdentifierAttrs
                 .Select(t => attrs.GetValueOrDefault(t, ""))
                 .FirstOrDefault(v => WildcardMatch(v, Config.CablePattern));
+
+            if (cableTag == null && Config.AbsorbChildMarkers)
+                cableTag = Config.ChildIdentifierAttrs
+                    .Select(t => attrs.GetValueOrDefault(t, ""))
+                    .FirstOrDefault(v => WildcardMatch(v, Config.CablePattern));
 
             if (cableTag != null)
                 AbsorbCableBlock(cableTag, attrs, sheet, result);
